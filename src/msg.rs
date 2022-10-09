@@ -19,11 +19,6 @@ pub enum HandleMsg {
         amount: Uint128,
         msg: Option<Binary>,
     },
-    RescueTokens {
-        denom: Option<String>,
-        key: Option<String>,
-        token_address: Option<HumanAddr>,
-    },
     UpdateConfig {
         addresses_allowed_to_fill: Option<Vec<HumanAddr>>,
         execution_fee: Option<Uint128>,

@@ -3,14 +3,11 @@ use crate::constants::{
     PREFIX_CANCEL_RECORDS, PREFIX_CANCEL_RECORDS_COUNT, PREFIX_FILL_RECORDS_COUNT,
 };
 use crate::msg::{HandleMsg, InitMsg, QueryMsg};
-use crate::state::{
-    read_registered_token, ActivityRecord, Config, RegisteredToken, SecretContract,
-};
+use crate::state::{ActivityRecord, Config, SecretContract};
 use crate::validations::authorize;
 use cosmwasm_std::{
-    to_binary, Api, BalanceResponse, BankMsg, BankQuery, Binary, CanonicalAddr, Coin, CosmosMsg,
-    Env, Extern, HandleResponse, HumanAddr, InitResponse, Querier, QueryRequest, ReadonlyStorage,
-    StdError, StdResult, Storage, Uint128,
+    to_binary, Api, Binary, CanonicalAddr, Env, Extern, HandleResponse, HumanAddr, InitResponse,
+    Querier, ReadonlyStorage, StdResult, Storage, Uint128,
 };
 use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
 use primitive_types::U256;
@@ -47,11 +44,6 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
         HandleMsg::Receive {
             from, amount, msg, ..
         } => receive(deps, env, from, amount, msg),
-        HandleMsg::RescueTokens {
-            denom,
-            key,
-            token_address,
-        } => rescue_tokens(deps, &env, denom, key, token_address),
         HandleMsg::UpdateConfig {
             addresses_allowed_to_fill,
             execution_fee,
@@ -188,70 +180,6 @@ fn query_balance_of_token<S: Storage, A: Api, Q: Querier>(
     }
 }
 
-fn rescue_tokens<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    denom: Option<String>,
-    key: Option<String>,
-    token_address: Option<HumanAddr>,
-) -> StdResult<HandleResponse> {
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    authorize(vec![config.admin.clone()], &env.message.sender)?;
-
-    let mut messages: Vec<CosmosMsg> = vec![];
-    if let Some(denom_unwrapped) = denom {
-        let balance_response: BalanceResponse =
-            deps.querier.query(&QueryRequest::Bank(BankQuery::Balance {
-                address: env.contract.address.clone(),
-                denom: denom_unwrapped,
-            }))?;
-
-        let withdrawal_coins: Vec<Coin> = vec![balance_response.amount];
-        messages.push(CosmosMsg::Bank(BankMsg::Send {
-            from_address: env.contract.address.clone(),
-            to_address: config.admin.clone(),
-            amount: withdrawal_coins,
-        }));
-    }
-
-    if let Some(token_address_unwrapped) = token_address {
-        if let Some(key_unwrapped) = key {
-            let registered_token: RegisteredToken = read_registered_token(
-                &deps.storage,
-                &deps.api.canonical_address(&token_address_unwrapped)?,
-            )
-            .unwrap();
-            let balance: Uint128 = query_balance_of_token(
-                deps,
-                env.contract.address.clone(),
-                SecretContract {
-                    address: token_address_unwrapped,
-                    contract_hash: registered_token.contract_hash.clone(),
-                },
-                key_unwrapped,
-            )?;
-            let sum_balance: Uint128 = registered_token.sum_balance;
-            let difference: Uint128 = (balance - sum_balance)?;
-            if !difference.is_zero() {
-                messages.push(snip20::transfer_msg(
-                    config.admin,
-                    difference,
-                    None,
-                    BLOCK_SIZE,
-                    registered_token.contract_hash,
-                    registered_token.address,
-                )?)
-            }
-        }
-    }
-
-    Ok(HandleResponse {
-        messages,
-        log: vec![],
-        data: None,
-    })
-}
-
 // Take a Vec<u8> and pad it up to a multiple of `block_size`, using spaces at the end.
 fn space_pad(block_size: usize, message: &mut Vec<u8>) -> &mut Vec<u8> {
     let len = message.len();
@@ -264,18 +192,6 @@ fn space_pad(block_size: usize, message: &mut Vec<u8>) -> &mut Vec<u8> {
     message.reserve(missing);
     message.extend(std::iter::repeat(b' ').take(missing));
     message
-}
-
-fn storage_count<S: ReadonlyStorage>(
-    store: &S,
-    for_address: &CanonicalAddr,
-    storage_prefix: &[u8],
-) -> StdResult<u128> {
-    let store = ReadonlyPrefixedStorage::new(storage_prefix, store);
-    let store = TypedStore::<u128, _>::attach(&store);
-    let position: Option<u128> = store.may_load(for_address.as_slice())?;
-
-    Ok(position.unwrap_or(0))
 }
 
 fn update_config<S: Storage, A: Api, Q: Querier>(
