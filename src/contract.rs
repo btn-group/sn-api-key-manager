@@ -3,7 +3,7 @@ use crate::constants::{
     PREFIX_CANCEL_RECORDS, PREFIX_CANCEL_RECORDS_COUNT, PREFIX_FILL_RECORDS,
     PREFIX_FILL_RECORDS_COUNT, PREFIX_ORDERS, PREFIX_ORDERS_COUNT,
 };
-use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg, Snip20Swap};
+use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg};
 use crate::state::{
     delete_route_state, read_registered_token, read_route_state, store_route_state,
     write_registered_token, ActivityRecord, Config, Hop, HumanizedOrder, Order, RegisteredToken,
@@ -725,176 +725,6 @@ fn get_orders<A: Api, S: ReadonlyStorage>(
     Ok((orders, total))
 }
 
-fn handle_first_hop<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    borrow_amount: Uint128,
-    mut hops: VecDeque<Hop>,
-    minimum_acceptable_amount: Option<Uint128>,
-) -> StdResult<HandleResponse> {
-    // This is the first msg from the user, with the entire route details
-    // 1. save the remaining route to state (e.g. if the route is X/Y -> Y/Z -> Z->W then save Y/Z -> Z/W to state)
-    // 2. send `amount` X to pair X/Y
-    // 3. call FinalizeRoute to make sure everything went ok, otherwise revert the tx
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    authorize(config.addresses_allowed_to_fill, &env.message.sender)?;
-    if hops.len() < 2 {
-        return Err(StdError::generic_err("Route must be at least 2 hops."));
-    }
-
-    // unwrap is cool because `hops.len() >= 2`
-    let first_hop: Hop = hops.pop_front().unwrap();
-    let route_state: RouteState = RouteState {
-        current_hop: Some(first_hop.clone()),
-        remaining_hops: hops,
-        borrow_amount,
-        borrow_token: first_hop.from_token.clone(),
-        initiator: env.message.sender.clone(),
-        minimum_acceptable_amount,
-    };
-    store_route_state(&mut deps.storage, &route_state)?;
-    let mut msgs = vec![snip20::send_msg(
-        first_hop.trade_smart_contract.address.clone(),
-        borrow_amount,
-        Some(swap_msg(
-            env.contract.address.clone(),
-            first_hop.position.as_ref(),
-        )?),
-        None,
-        BLOCK_SIZE,
-        first_hop.from_token.contract_hash,
-        first_hop.from_token.address,
-    )?];
-
-    msgs.push(
-        // finalize the route at the end, to make sure the route was completed successfully
-        CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: env.contract.address.clone(),
-            callback_code_hash: env.contract_code_hash.clone(),
-            msg: to_binary(&HandleMsg::FinalizeRoute {})?,
-            send: vec![],
-        }),
-    );
-
-    Ok(HandleResponse {
-        messages: msgs,
-        log: vec![],
-        data: None,
-    })
-}
-
-fn handle_hop<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    from: HumanAddr,
-    mut amount: Uint128,
-) -> StdResult<HandleResponse> {
-    match read_route_state(&deps.storage)? {
-        Some(RouteState {
-            current_hop,
-            remaining_hops: mut hops,
-            borrow_amount,
-            borrow_token,
-            minimum_acceptable_amount,
-            initiator,
-        }) => {
-            validate_human_addr(
-                &current_hop.unwrap().trade_smart_contract.address,
-                &from,
-                "Route called from wrong trade smart contract.",
-            )?;
-
-            let mut messages = vec![];
-            let popped_hop: Option<Hop> = hops.pop_front();
-            if let Some(popped_hop_unwrapped) = popped_hop.clone() {
-                let next_hop: Hop = popped_hop_unwrapped;
-                validate_human_addr(
-                    &next_hop.from_token.address,
-                    &env.message.sender,
-                    "Route called by wrong token.",
-                )?;
-
-                // if the next hop is this contract
-                // check that the amount is less than or equal to that order's unfilled amount
-                // only send in the unfilled amount
-                // we can rescue the dust later when worthwhile while making gas more predictable
-                if next_hop.trade_smart_contract.address == env.contract.address {
-                    let next_trade_order = order_at_position(
-                        &deps.storage,
-                        &deps.api.canonical_address(&env.contract.address)?,
-                        next_hop.position.unwrap().u128(),
-                    )?;
-                    let unfilled_amount =
-                        (next_trade_order.net_to_amount - next_trade_order.net_to_amount_filled)?;
-                    if amount.gt(&unfilled_amount) {
-                        amount = unfilled_amount
-                    }
-                }
-                messages.push(snip20::send_msg(
-                    next_hop.trade_smart_contract.address.clone(),
-                    amount,
-                    Some(swap_msg(
-                        env.contract.address.clone(),
-                        next_hop.position.as_ref(),
-                    )?),
-                    None,
-                    BLOCK_SIZE,
-                    next_hop.from_token.contract_hash,
-                    next_hop.from_token.address,
-                )?);
-            } else {
-                validate_human_addr(
-                    &borrow_token.address,
-                    &env.message.sender,
-                    "Route called by wrong token.",
-                )?;
-                if amount.lt(&borrow_amount) {
-                    return Err(StdError::generic_err(
-                        "Operation fell short of borrow_amount.",
-                    ));
-                }
-                if let Some(minimum_acceptable_amount_unwrapped) = minimum_acceptable_amount {
-                    if amount.lt(&minimum_acceptable_amount_unwrapped) {
-                        return Err(StdError::generic_err(
-                            "Operation fell short of minimum_acceptable_amount.",
-                        ));
-                    }
-                }
-
-                // Send fee to initiator
-                if amount.gt(&borrow_amount) {
-                    messages.push(snip20::transfer_msg(
-                        initiator.clone(),
-                        (amount - borrow_amount).unwrap(),
-                        None,
-                        BLOCK_SIZE,
-                        borrow_token.contract_hash.clone(),
-                        borrow_token.address.clone(),
-                    )?);
-                }
-            }
-            store_route_state(
-                &mut deps.storage,
-                &RouteState {
-                    current_hop: popped_hop,
-                    remaining_hops: hops,
-                    borrow_amount,
-                    borrow_token,
-                    initiator,
-                    minimum_acceptable_amount,
-                },
-            )?;
-
-            Ok(HandleResponse {
-                messages,
-                log: vec![],
-                data: None,
-            })
-        }
-        None => Err(StdError::generic_err("cannot find route")),
-    }
-}
-
 fn order_at_position<S: Storage>(
     store: &S,
     address: &CanonicalAddr,
@@ -1122,22 +952,6 @@ fn storage_count<S: ReadonlyStorage>(
     let position: Option<u128> = store.may_load(for_address.as_slice())?;
 
     Ok(position.unwrap_or(0))
-}
-
-fn swap_msg(contract_address: HumanAddr, position: Option<&Uint128>) -> StdResult<Binary> {
-    let swap_msg = if let Some(position_unwrapped) = position {
-        to_binary(&ReceiveMsg::FillOrder {
-            position: *position_unwrapped,
-        })?
-    } else {
-        to_binary(&Snip20Swap::Swap {
-            // set expected_return to None because we don't care about slippage mid-route
-            expected_return: None,
-            // set the recepient of the swap to be this contract (the router)
-            to: Some(contract_address),
-        })?
-    };
-    Ok(swap_msg)
 }
 
 fn update_config<S: Storage, A: Api, Q: Querier>(
