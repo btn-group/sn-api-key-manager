@@ -1,4 +1,4 @@
-use crate::state::{ActivityRecord, SecretContract};
+use crate::state::SecretContract;
 use cosmwasm_std::{Binary, HumanAddr, Uint128};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,35 +25,8 @@ pub enum HandleMsg {
     },
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryAnswer<HumanizedOrder> {
-    ActivityRecords {
-        activity_records: Vec<ActivityRecord>,
-        total: Option<Uint128>,
-    },
-    Orders {
-        orders: Vec<HumanizedOrder>,
-        total: Option<Uint128>,
-    },
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
     Config {},
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ReceiveMsg {
-    SetExecutionFeeForOrder {},
-    CreateOrder {
-        butt_viewing_key: String,
-        to_amount: Uint128,
-        to_token: HumanAddr,
-    },
-    FillOrder {
-        position: Uint128,
-    },
 }
