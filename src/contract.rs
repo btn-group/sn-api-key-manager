@@ -94,35 +94,6 @@ fn prefix_activity_records_count(activity_records_storage_prefix: &[u8]) -> &[u8
     }
 }
 
-fn append_activity_record<S: Storage>(
-    store: &mut S,
-    activity_record: &ActivityRecord,
-    for_address: &CanonicalAddr,
-    storage_prefix: &[u8],
-) -> StdResult<()> {
-    let mut prefixed_store =
-        PrefixedStorage::multilevel(&[storage_prefix, for_address.as_slice()], store);
-    let mut activity_record_store = TypedStoreMut::<ActivityRecord, _>::attach(&mut prefixed_store);
-    activity_record_store.store(
-        &activity_record.position.u128().to_le_bytes(),
-        activity_record,
-    )?;
-    set_count(
-        store,
-        for_address,
-        prefix_activity_records_count(storage_prefix),
-        activity_record
-            .position
-            .u128()
-            .checked_add(1)
-            .ok_or_else(|| {
-                StdError::generic_err(
-                    "Reached implementation limit for the number of activity records per address.",
-                )
-            })?,
-    )
-}
-
 fn set_count<S: Storage>(
     store: &mut S,
     for_address: &CanonicalAddr,
